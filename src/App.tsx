@@ -2,16 +2,23 @@ import { useMemo, useState } from 'react'
 import { RuleTable } from './RuleTable'
 import { AuditResults } from './AuditResults'
 import { ImportModal, ExportModal } from './Modals'
+import { ReorderPreviewModal } from './ReorderPreviewModal'
 import { audit, exportReport, newRuleInput, parseRulesJson } from './audit/engine'
+import { movedRules } from './audit/reorder'
 import type { RuleInput } from './audit/types'
 import { createDemoRules } from './defaultRules'
 import { formatSize } from './format'
 import './styles.css'
 
+interface PendingReorder {
+  candidate: RuleInput[]
+}
+
 export default function App() {
   const [rules, setRules] = useState<RuleInput[]>(() => createDemoRules())
   const [showImport, setShowImport] = useState(false)
   const [showExport, setShowExport] = useState(false)
+  const [pendingReorder, setPendingReorder] = useState<PendingReorder | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
   const report = useMemo(() => audit(rules), [rules])
@@ -33,13 +40,21 @@ export default function App() {
 
   const addRule = () => setRules((rs) => [...rs, newRuleInput(rs.length)])
 
-  const reorder = (from: number, to: number) =>
-    setRules((rs) => {
-      const next = [...rs]
-      const [moved] = next.splice(from, 1)
-      next.splice(to, 0, moved)
-      return next
-    })
+  // 拖拽只产生候选顺序：rules 不立即改动，先弹出影响预览
+  const requestReorder = (from: number, to: number) => {
+    if (from === to) return
+    setPendingReorder({ candidate: movedRules(rules, from, to) })
+  }
+
+  const confirmReorder = () => {
+    if (!pendingReorder) return
+    setRules(pendingReorder.candidate)
+    setPendingReorder(null)
+    setNotice('候选顺序已应用，审计结果已按新顺序刷新。')
+    setTimeout(() => setNotice(null), 4000)
+  }
+
+  const cancelReorder = () => setPendingReorder(null)
 
   const handleImport = (text: string, mode: 'replace' | 'append'): string[] => {
     const { rules: parsed, errors } = parseRulesJson(text)
@@ -136,7 +151,7 @@ export default function App() {
         onChange={patchRule}
         onRemove={removeRule}
         onDuplicate={duplicateRule}
-        onReorder={reorder}
+        onReorder={requestReorder}
         onAdd={addRule}
       />
 
@@ -163,6 +178,14 @@ export default function App() {
       )}
       {showExport && (
         <ExportModal json={exportJson} onClose={() => setShowExport(false)} />
+      )}
+      {pendingReorder && (
+        <ReorderPreviewModal
+          current={rules}
+          candidate={pendingReorder.candidate}
+          onConfirm={confirmReorder}
+          onCancel={cancelReorder}
+        />
       )}
     </div>
   )

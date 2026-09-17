@@ -1,6 +1,7 @@
 /** 审计引擎自检：node --test 风格的轻量断言脚本（零额外依赖） */
 import assert from 'node:assert'
 import { audit, parseRulesJson, validateRules } from './audit/engine'
+import { movedRules, previewReorder } from './audit/reorder'
 import type { RuleInput } from './audit/types'
 import { ipv4ToInt, parseCidrStrict } from './audit/iputil'
 
@@ -249,6 +250,147 @@ test('JSON 导入：数组 / {rules} / 导出报告 三种形态', () => {
 test('JSON 导入：非法 JSON 报错', () => {
   const r = parseRulesJson('{not json')
   assert.ok(r.errors[0].includes('JSON 解析失败'))
+})
+
+// --- 调序影响预览 ---
+test('调序预览：重叠规则互换位置产生动作变化与可复现样例', () => {
+  const deny = rule({ name: 'deny-ssh', cidr: '192.168.0.0/16', portStart: '22', portEnd: '22', protocol: 'TCP', action: 'deny' })
+  const allow = rule({ name: 'allow-all', cidr: '0.0.0.0/0', action: 'allow' })
+  const current = [deny, allow]
+  const candidate = [allow, deny]
+  const p = previewReorder(current, candidate)
+
+  assert.equal(p.hasDifference, true)
+  assert.equal(p.actionChanges.length, 1)
+  const ch = p.actionChanges[0]
+  assert.equal(ch.oldRuleId, deny.id)
+  assert.equal(ch.newRuleId, allow.id)
+  assert.equal(ch.oldAction, 'deny')
+  assert.equal(ch.newAction, 'allow')
+  // 样例报文落在重叠区域 SSH 上：TCP 192.168.x.x:22
+  assert.equal(ch.packet.protocol, 'TCP')
+  assert.equal(ch.packet.srcPort, 22)
+  const ipNum = ipv4ToInt(ch.packet.srcIp)
+  assert.ok(ipNum >= ipv4ToInt('192.168.0.0') && ipNum <= ipv4ToInt('192.168.255.255'))
+  // 变化空间 = /16 个 IP × 1 端口 × 1 协议
+  assert.equal(ch.size, 65536)
+
+  // 用暴力首命中复现：候选顺序下该报文必须命中 allow-all（allow）
+  const { valid: cand } = validateRules(candidate)
+  const hitCand = cand.find(
+    (r) =>
+      ipNum >= r.ipStart &&
+      ipNum <= r.ipEnd &&
+      ch.packet.srcPort >= r.portStart &&
+      ch.packet.srcPort <= r.portEnd &&
+      (r.protocol === 'ANY' || r.protocol === ch.packet.protocol),
+  )
+  assert.equal(hitCand!.id, allow.id)
+  // 当前顺序下命中 deny-ssh（deny）
+  const { valid: old } = validateRules(current)
+  const hitOld = old.find(
+    (r) =>
+      ipNum >= r.ipStart &&
+      ipNum <= r.ipEnd &&
+      ch.packet.srcPort >= r.portStart &&
+      ch.packet.srcPort <= r.portEnd &&
+      (r.protocol === 'ANY' || r.protocol === ch.packet.protocol),
+  )
+  assert.equal(hitOld!.id, deny.id)
+
+  // 逐规则视图：两条规则的状态 / 有效空间都翻转
+  const denyView = p.rules.find((v) => v.id === deny.id)!
+  assert.equal(denyView.oldStatus, 'reachable')
+  assert.equal(denyView.newStatus, 'fully-shadowed')
+  assert.equal(denyView.sizeDelta, -65536)
+  const allowView = p.rules.find((v) => v.id === allow.id)!
+  assert.equal(allowView.sizeDelta, 65536)
+})
+
+test('调序预览：不相交规则换位仅有序号变化、无实际差异', () => {
+  const a = rule({ name: 'A', cidr: '10.0.0.0/8', action: 'deny' })
+  const b = rule({ name: 'B', cidr: '192.168.0.0/16', action: 'allow' })
+  const current = [a, b]
+  const candidate = [b, a]
+  const p = previewReorder(current, candidate)
+
+  assert.equal(p.hasDifference, false)
+  assert.equal(p.actionChanges.length, 0)
+  assert.equal(p.sameActionChanges.length, 0)
+  assert.equal(p.totalReassignedSize, 0)
+  assert.equal(p.rules.length, 2)
+  assert.ok(p.rules.every((v) => v.moved && !v.auditChanged))
+  assert.equal(p.rules.find((v) => v.id === b.id)!.oldIndex, 1)
+  assert.equal(p.rules.find((v) => v.id === b.id)!.newIndex, 0)
+  // 状态与有效空间保持不变
+  assert.ok(p.rules.every((v) => v.oldStatus === v.newStatus && v.sizeDelta === 0))
+})
+
+test('调序预览：动作相同的规则互换只产生 sameActionChanges', () => {
+  const a = rule({ name: 'A', cidr: '10.0.0.0/8', action: 'allow' })
+  const b = rule({ name: 'B', cidr: '0.0.0.0/0', action: 'allow' })
+  const p = previewReorder([a, b], [b, a])
+  assert.equal(p.actionChanges.length, 0)
+  assert.equal(p.sameActionChanges.length, 1)
+  assert.equal(p.hasDifference, true)
+  assert.equal(p.sameActionChanges[0].size, 2 ** 24 * 65536 * 2)
+})
+
+test('调序预览：非法规则跟随移动但继续不参与分析', () => {
+  const a = rule({ name: 'good-a', cidr: '10.0.0.0/8', action: 'allow' })
+  const bad = rule({ name: 'bad', cidr: '10.0.0.5/24', action: 'allow' })
+  const b = rule({ name: 'good-b', cidr: '192.168.0.0/16', action: 'deny' })
+  const current = [a, bad, b]
+  // 把非法规则从 #2 拖到 #3：[a, b, bad]
+  const candidate = movedRules(current, 1, 2)
+  assert.deepEqual(candidate.map((r) => r.id), [a.id, b.id, bad.id])
+  const p = previewReorder(current, candidate)
+
+  const badView = p.rules.find((v) => v.id === bad.id)!
+  assert.equal(badView.oldStatus, 'invalid')
+  assert.equal(badView.newStatus, 'invalid')
+  assert.equal(badView.moved, true)
+  assert.equal(badView.oldIndex, 1)
+  assert.equal(badView.newIndex, 2)
+  assert.equal(badView.sizeDelta, 0)
+  // 合法规则区域不相交：没有任何流量归属变化
+  assert.equal(p.actionChanges.length, 0)
+  assert.equal(p.sameActionChanges.length, 0)
+})
+
+test('调序预览：未移动的规则也会被上移到其前面的规则遮蔽（影响不限于被拖动规则）', () => {
+  // a 与 c 重叠（a 区域更窄），b 与两者不相交；a/b 同动作，c 为兜底 deny
+  const a = rule({ name: 'a-web', cidr: '10.0.0.0/24', action: 'allow' })
+  const b = rule({ name: 'b-other', cidr: '192.168.0.0/16', action: 'allow' })
+  const c = rule({ name: 'c-deny-all', cidr: '0.0.0.0/0', action: 'deny' })
+  const current = [a, b, c]
+  // 把 c 从 #3 拖到 a 与 b 之间：a(index 0) 位置不变，b 下移
+  const candidate = movedRules(current, 2, 1)
+  assert.deepEqual(candidate.map((r) => r.id), [a.id, c.id, b.id])
+  const p = previewReorder(current, candidate)
+
+  // a 未移动，但 c 现在不在其前方，状态不变；真正被影响的是下移的 b
+  const aView = p.rules.find((v) => v.id === a.id)
+  if (aView) {
+    assert.equal(aView.moved, false)
+    assert.equal(aView.auditChanged, false)
+  }
+  // b 下移一位，前面插入 c(deny all)：由可达变为完全遮蔽
+  const bView = p.rules.find((v) => v.id === b.id)!
+  assert.equal(bView.moved, true)
+  assert.equal(bView.oldStatus, 'reachable')
+  assert.equal(bView.newStatus, 'fully-shadowed')
+  assert.ok(bView.sizeDelta < 0)
+  // 流量首命中动作：allow(b) → deny(c)
+  assert.ok(p.actionChanges.length >= 1)
+  const acts = new Set(
+    p.actionChanges.map((ch) => `${ch.oldRuleId}>${ch.newRuleId}:${ch.oldAction}>${ch.newAction}`),
+  )
+  assert.ok(acts.has(`${b.id}>${c.id}:allow>deny`))
+  const ch = p.actionChanges.find((x) => x.oldRuleId === b.id && x.newRuleId === c.id)!
+  assert.equal(ch.packet.protocol, 'TCP')
+  const ipNum = ipv4ToInt(ch.packet.srcIp)
+  assert.ok(ipNum >= ipv4ToInt('192.168.0.0') && ipNum <= ipv4ToInt('192.168.255.255'))
 })
 
 console.log(`\n全部 ${passed} 项测试通过 ✔`)

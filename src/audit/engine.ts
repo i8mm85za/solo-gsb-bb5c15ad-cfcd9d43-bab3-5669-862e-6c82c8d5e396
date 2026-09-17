@@ -239,6 +239,38 @@ function containedIndices<T extends { start: number; end: number }>(
   return out
 }
 
+/** 单个原子单元的报文空间大小 */
+export function atomCellSize(ip: IpAtom, port: PortAtom): number {
+  return (ip.end - ip.start + 1) * (port.end - port.start + 1)
+}
+
+/**
+ * 在给定的原子空间上，按规则顺序登记每个单元 (ipIdx.portIdx.protoIdx)
+ * 的首个命中者（valid 列表下标）。调序预览复用它对当前 / 候选顺序
+ * 在同一套原子划分上各跑一次，从而逐单元对齐对比。
+ */
+export function buildOwnerMap(
+  valid: NormalizedRule[],
+  ipAtoms: IpAtom[],
+  portAtoms: PortAtom[],
+): Map<string, number> {
+  const owner = new Map<string, number>()
+  valid.forEach((rule, rulePos) => {
+    const ipIdx = containedIndices(ipAtoms, rule.ipStart, rule.ipEnd)
+    const portIdx = containedIndices(portAtoms, rule.portStart, rule.portEnd)
+    const protoIdx = PROTO_INDEX.get(rule.protocol)!
+    for (const ip of ipIdx) {
+      for (const port of portIdx) {
+        for (const proto of protoIdx) {
+          const key = `${ip}.${port}.${proto}`
+          if (!owner.has(key)) owner.set(key, rulePos)
+        }
+      }
+    }
+  })
+  return owner
+}
+
 // ---------------------------------------------------------------------------
 // 示例报文与区域合并
 // ---------------------------------------------------------------------------
