@@ -1,6 +1,7 @@
 /** 审计引擎自检：node --test 风格的轻量断言脚本（零额外依赖） */
 import assert from 'node:assert'
 import { audit, parseRulesJson, validateRules } from './audit/engine'
+import { previewReorder } from './audit/diff'
 import type { RuleInput } from './audit/types'
 import { ipv4ToInt, parseCidrStrict } from './audit/iputil'
 
@@ -249,6 +250,128 @@ test('JSON 导入：数组 / {rules} / 导出报告 三种形态', () => {
 test('JSON 导入：非法 JSON 报错', () => {
   const r = parseRulesJson('{not json')
   assert.ok(r.errors[0].includes('JSON 解析失败'))
+})
+
+// --- 调序影响预览 ---
+test('调序预览：交换重叠规则，受影响规则的状态 / 序号 / 变化量正确且不改动原数组', () => {
+  const rules = [
+    rule({ name: 'A', cidr: '10.0.0.0/25' }),
+    rule({ name: 'B', cidr: '10.0.0.0/24' }),
+  ]
+  const { candidate, preview } = previewReorder(rules, 0, 1)
+
+  // 原数组不被修改，候选顺序为 [B, A]
+  assert.equal(rules[0].name, 'A')
+  assert.deepEqual(
+    candidate.map((r) => r.name),
+    ['B', 'A'],
+  )
+  assert.equal(preview.hasDifferences, true)
+  assert.equal(preview.movedName, 'A')
+  assert.equal(preview.fromIndex, 0)
+  assert.equal(preview.toIndex, 1)
+
+  const half = 128 * 65536 * 2 // 半个 /24 × 全部端口 × TCP+UDP
+  const byName = new Map(preview.changes.map((c) => [c.name, c]))
+  assert.equal(preview.changes.length, 2)
+  const a = byName.get('A')!
+  assert.equal(a.beforeIndex, 0)
+  assert.equal(a.afterIndex, 1)
+  assert.equal(a.beforeStatus, 'reachable')
+  assert.equal(a.afterStatus, 'fully-shadowed')
+  assert.equal(a.beforeEffectiveSize, half)
+  assert.equal(a.afterEffectiveSize, 0)
+  assert.equal(a.effectiveDelta, -half)
+  const b = byName.get('B')!
+  assert.equal(b.beforeIndex, 1)
+  assert.equal(b.afterIndex, 0)
+  assert.equal(b.beforeStatus, 'partial-shadowed')
+  assert.equal(b.afterStatus, 'reachable')
+  assert.equal(b.effectiveDelta, half)
+})
+
+test('调序预览：动作变化样例可复现，变更前后命中规则与动作正确', () => {
+  const rules = [
+    rule({ name: 'deny-ssh', cidr: '192.168.0.0/16', portStart: '22', portEnd: '22', protocol: 'TCP', action: 'deny' }),
+    rule({ name: 'allow-all', cidr: '0.0.0.0/0', action: 'allow' }),
+  ]
+  const { candidate, preview } = previewReorder(rules, 0, 1)
+  assert.equal(preview.actionChangedCells, 1) // 仅 192.168.0.0/16 × 22 × TCP 一个单元
+  assert.equal(preview.ownerChangedCells, 1)
+  assert.equal(preview.actionChangeSamples.length, 1)
+
+  const s = preview.actionChangeSamples[0]
+  assert.equal(s.protocol, 'TCP')
+  assert.equal(s.srcPort, 22)
+  assert.equal(s.before.ruleName, 'deny-ssh')
+  assert.equal(s.before.action, 'deny')
+  assert.equal(s.after.ruleName, 'allow-all')
+  assert.equal(s.after.action, 'allow')
+
+  // 可复现性：样例报文在旧顺序下首命中 before 规则，在新顺序下首命中 after 规则
+  const firstHit = (list: RuleInput[]) => {
+    const { valid } = validateRules(list)
+    const ipNum = ipv4ToInt(s.srcIp)
+    return valid.find(
+      (r) =>
+        ipNum >= r.ipStart &&
+        ipNum <= r.ipEnd &&
+        s.srcPort >= r.portStart &&
+        s.srcPort <= r.portEnd &&
+        (r.protocol === 'ANY' || r.protocol === s.protocol),
+    )!
+  }
+  const hitBefore = firstHit(rules)
+  assert.equal(hitBefore.index, s.before.ruleIndex)
+  assert.equal(hitBefore.action, 'deny')
+  const hitAfter = firstHit(candidate)
+  assert.equal(hitAfter.index, s.after.ruleIndex)
+  assert.equal(hitAfter.action, 'allow')
+})
+
+test('调序预览：互不重叠的规则交换后无实际差异', () => {
+  const rules = [
+    rule({ name: 'A', cidr: '10.0.0.0/8', protocol: 'TCP' }),
+    rule({ name: 'B', cidr: '192.168.0.0/16', protocol: 'UDP' }),
+  ]
+  const { preview } = previewReorder(rules, 0, 1)
+  assert.equal(preview.hasDifferences, false)
+  assert.equal(preview.changes.length, 0)
+  assert.equal(preview.ownerChangedCells, 0)
+  assert.equal(preview.actionChangedCells, 0)
+  assert.equal(preview.actionChangeSamples.length, 0)
+})
+
+test('调序预览：同动作规则交换，首命中规则变化但动作不变', () => {
+  const rules = [
+    rule({ name: 'A', cidr: '10.0.0.0/25', action: 'allow' }),
+    rule({ name: 'B', cidr: '10.0.0.0/24', action: 'allow' }),
+  ]
+  const { preview } = previewReorder(rules, 0, 1)
+  assert.equal(preview.hasDifferences, true)
+  // 10.0.0.0/25 × 全部端口 × TCP+UDP = 2 个单元的首命中者易主，但动作都是 allow
+  assert.equal(preview.ownerChangedCells, 2)
+  assert.equal(preview.actionChangedCells, 0)
+  assert.equal(preview.actionChangeSamples.length, 0)
+})
+
+test('调序预览：非法规则不参与对比，其余规则按 id 对齐', () => {
+  const rules = [
+    rule({ name: 'good', cidr: '10.0.0.0/8' }),
+    rule({ name: 'bad', cidr: '10.0.0.0/99' }),
+    rule({ name: 'after', cidr: '10.0.0.0/8' }),
+  ]
+  const badId = rules[1].id
+  const { candidate, preview } = previewReorder(rules, 2, 0)
+  assert.equal(preview.invalidCount, 1)
+  assert.ok(preview.changes.every((c) => c.id !== badId))
+  assert.deepEqual(
+    preview.changes.map((c) => c.name).sort(),
+    ['after', 'good'],
+  )
+  // 非法规则仍保留在候选顺序中（位置随调序移动），只是不参与分析
+  assert.equal(candidate.length, 3)
+  assert.equal(candidate[2].id, badId)
 })
 
 console.log(`\n全部 ${passed} 项测试通过 ✔`)

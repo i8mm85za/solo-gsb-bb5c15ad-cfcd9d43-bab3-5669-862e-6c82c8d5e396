@@ -154,3 +154,58 @@ export interface AuditReport {
   stats: AuditStats
   entries: AuditResultEntry[]
 }
+
+// ---------------------------------------------------------------------------
+// 调序影响预览
+// ---------------------------------------------------------------------------
+
+/** 单条规则在两种顺序下的审计差异（按规则 id 对齐） */
+export interface ReorderRuleChange {
+  id: string
+  name: string
+  /** 旧顺序中的序号（0 起） */
+  beforeIndex: number
+  /** 新顺序中的序号（0 起） */
+  afterIndex: number
+  beforeStatus: AuditEntry['status']
+  afterStatus: AuditEntry['status']
+  /** 声明区域的报文空间大小（调序不变，仅作参照） */
+  declaredSize: number
+  beforeEffectiveSize: number
+  afterEffectiveSize: number
+  /** afterEffectiveSize - beforeEffectiveSize */
+  effectiveDelta: number
+}
+
+/** 首命中动作发生变化的流量的可复现样例 */
+export interface ActionChangeSample {
+  srcIp: string
+  srcPort: number
+  protocol: Exclude<Protocol, 'ANY'>
+  /** 变更前首命中的规则与动作 */
+  before: { ruleIndex: number; ruleName: string; action: Action }
+  /** 变更后首命中的规则与动作 */
+  after: { ruleIndex: number; ruleName: string; action: Action }
+}
+
+/** 一次调序的完整影响预览 */
+export interface ReorderPreview {
+  movedId: string
+  movedName: string
+  /** 拖拽源序号（0 起） */
+  fromIndex: number
+  /** 目标序号（0 起） */
+  toIndex: number
+  /** 审计结果发生变化的规则（状态或有效报文空间），按 |变化量| 降序 */
+  changes: ReorderRuleChange[]
+  /** 首命中规则发生变化的单元数 */
+  ownerChangedCells: number
+  /** 首命中动作发生变化的单元数（ownerChangedCells 的子集） */
+  actionChangedCells: number
+  /** 动作变化的可复现样例（确定性选取，最多 3 个） */
+  actionChangeSamples: ActionChangeSample[]
+  /** 是否存在任何实际差异（规则审计结果或单元首命中者） */
+  hasDifferences: boolean
+  /** 非法规则数量：按既有语义不参与分析，也不参与对比 */
+  invalidCount: number
+}

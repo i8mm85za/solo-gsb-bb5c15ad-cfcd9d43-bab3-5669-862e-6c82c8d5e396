@@ -2,8 +2,10 @@ import { useMemo, useState } from 'react'
 import { RuleTable } from './RuleTable'
 import { AuditResults } from './AuditResults'
 import { ImportModal, ExportModal } from './Modals'
+import { ReorderPreviewModal } from './ReorderPreviewModal'
 import { audit, exportReport, newRuleInput, parseRulesJson } from './audit/engine'
-import type { RuleInput } from './audit/types'
+import { previewReorder } from './audit/diff'
+import type { ReorderPreview, RuleInput } from './audit/types'
 import { createDemoRules } from './defaultRules'
 import { formatSize } from './format'
 import './styles.css'
@@ -13,6 +15,11 @@ export default function App() {
   const [showImport, setShowImport] = useState(false)
   const [showExport, setShowExport] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  /** 待确认的调序：候选顺序 + 影响预览；确认前 rules 保持原顺序 */
+  const [pendingReorder, setPendingReorder] = useState<{
+    candidate: RuleInput[]
+    preview: ReorderPreview
+  } | null>(null)
 
   const report = useMemo(() => audit(rules), [rules])
   const exportJson = useMemo(() => exportReport(report), [report])
@@ -33,13 +40,15 @@ export default function App() {
 
   const addRule = () => setRules((rs) => [...rs, newRuleInput(rs.length)])
 
+  // 拖拽落点后不立即改动 rules：先对当前顺序与候选顺序分别审计并弹窗预览，
+  // 用户确认后才一次性应用候选顺序，取消则保持原顺序
   const reorder = (from: number, to: number) =>
-    setRules((rs) => {
-      const next = [...rs]
-      const [moved] = next.splice(from, 1)
-      next.splice(to, 0, moved)
-      return next
-    })
+    setPendingReorder(previewReorder(rules, from, to))
+
+  const applyReorder = () => {
+    if (pendingReorder) setRules(pendingReorder.candidate)
+    setPendingReorder(null)
+  }
 
   const handleImport = (text: string, mode: 'replace' | 'append'): string[] => {
     const { rules: parsed, errors } = parseRulesJson(text)
@@ -163,6 +172,13 @@ export default function App() {
       )}
       {showExport && (
         <ExportModal json={exportJson} onClose={() => setShowExport(false)} />
+      )}
+      {pendingReorder && (
+        <ReorderPreviewModal
+          preview={pendingReorder.preview}
+          onConfirm={applyReorder}
+          onCancel={() => setPendingReorder(null)}
+        />
       )}
     </div>
   )

@@ -243,9 +243,9 @@ function containedIndices<T extends { start: number; end: number }>(
 // 示例报文与区域合并
 // ---------------------------------------------------------------------------
 
-function exampleIp(atom: IpAtom): number {
+/** 原子块内的确定性代表地址：块内至少 4 个地址时取第 2 个，避免样例总是网络地址 */
+export function exampleIp(atom: IpAtom): number {
   const size = atom.end - atom.start + 1
-  // 块内至少 4 个地址时取第 2 个，避免样例总是网络地址
   return size >= 4 ? (atom.start + 1) >>> 0 : atom.start
 }
 
@@ -559,6 +559,44 @@ export function audit(inputs: RuleInput[], now: Date = new Date()): AuditReport 
     stats,
     entries,
   }
+}
+
+// ---------------------------------------------------------------------------
+// 单元级首命中归属（供调序预览等逐单元对比使用）
+// ---------------------------------------------------------------------------
+
+export interface CellOwnership {
+  valid: NormalizedRule[]
+  ipAtoms: IpAtom[]
+  portAtoms: PortAtom[]
+  /** key("ipAtom.portAtom.proto") -> 首个命中该单元的规则在 valid 中的下标 */
+  owner: Map<string, number>
+}
+
+/**
+ * 计算每个报文单元的首个命中者。非法规则按既有语义排除（不参与遮蔽）。
+ * 对同一批合法规则，无论顺序如何，原子空间与单元集合都相同，
+ * 因此两种顺序的结果可以逐单元对齐比较。
+ */
+export function computeCellOwnership(inputs: RuleInput[]): CellOwnership {
+  const { valid } = validateRules(inputs)
+  const ipAtoms = buildIpAtoms(valid)
+  const portAtoms = buildPortAtoms(valid)
+  const owner = new Map<string, number>()
+  valid.forEach((rule, pos) => {
+    const ipIdx = containedIndices(ipAtoms, rule.ipStart, rule.ipEnd)
+    const portIdx = containedIndices(portAtoms, rule.portStart, rule.portEnd)
+    const protoIdx = PROTO_INDEX.get(rule.protocol)!
+    for (const ip of ipIdx) {
+      for (const port of portIdx) {
+        for (const proto of protoIdx) {
+          const key = `${ip}.${port}.${proto}`
+          if (!owner.has(key)) owner.set(key, pos)
+        }
+      }
+    }
+  })
+  return { valid, ipAtoms, portAtoms, owner }
 }
 
 // ---------------------------------------------------------------------------

@@ -498,6 +498,10 @@ input.invalid-field {
   flex-direction: column;
 }
 
+.modal.wide {
+  width: 920px;
+}
+
 .modal-header {
   padding: 14px 18px;
   border-bottom: 1px solid var(--border);
@@ -569,4 +573,32 @@ pre.json-preview {
   color: var(--text-dim);
   font-size: 12px;
   margin-top: 6px;
+}
+
+/* 调序影响预览 */
+.preview-table {
+  margin-top: 4px;
+}
+
+.preview-table td {
+  vertical-align: middle;
+}
+
+.preview-subhead {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.delta-pos {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.delta-neg {
+  color: var(--danger);
+  font-weight: 600;
 }

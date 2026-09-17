@@ -47,7 +47,7 @@ export function RuleTable({
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
         <h2 style={{ margin: 0 }}>规则列表（自上而下，首条命中）</h2>
         <span className="legend" style={{ marginLeft: 12 }}>
-          拖拽 ⠿ 手柄或整行可排序
+          拖拽 ⠿ 手柄或整行调序；落点后先预览影响，确认才生效
         </span>
         <div style={{ flex: 1 }} />
         <button className="primary" onClick={onAdd}>
